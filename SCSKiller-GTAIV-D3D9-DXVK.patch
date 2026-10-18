@@ -1,0 +1,422 @@
+﻿diff --git a/src/SCSKiller.Core/App/ScsKiller.cs b/src/SCSKiller.Core/App/ScsKiller.cs
+index f5c5bfe..d02c934 100644
+--- a/src/SCSKiller.Core/App/ScsKiller.cs
++++ b/src/SCSKiller.Core/App/ScsKiller.cs
+@@ -178,7 +178,7 @@ public sealed partial class ScsKiller : IScsKiller
+         return new EngineReaders([("Unreal", new UnrealReader(dataDir)), (FromSoftReader.Family, new FromSoftReader(dataDir)),
+             (UnityReader.Family, new UnityReader()), (ReEngine.ReEngineReader.Family, new ReEngine.ReEngineReader(dataDir)),
+             (RedEngine.RedEngineReader.Family, new RedEngine.RedEngineReader()), (Dagor.DagorReader.Family, new Dagor.DagorReader()), (Northlight.NorthlightReader.Family, new Northlight.NorthlightReader()),
+-            (Source2.Source2Reader.Family, new Source2.Source2Reader()), (Rage.RageReader.Family, new Rage.RageReader()),
++            (Source2.Source2Reader.Family, new Source2.Source2Reader()), (Rage.Rage4Reader.Family, new Rage.Rage4Reader()), (Rage.RageReader.Family, new Rage.RageReader()),
+             (NaughtyDog.NaughtyDogReader.Family, new NaughtyDog.NaughtyDogReader()),
+             (SantaMonica.SantaMonicaReader.Family, new SantaMonica.SantaMonicaReader()),
+             (Nixxes.NixxesReader.Family, new Nixxes.NixxesReader()),
+@@ -2136,6 +2136,7 @@ public sealed partial class ScsKiller : IScsKiller
+     /// compile still takes them)</param>
+     string? StaleReason(Game g, GameRecord r, EngineInfo? e, Pending? pending = null, GpuSnapshot? gpu = null, bool status = false)
+     {
++        if (e?.Family == Rage.Rage4Reader.Family) return WarmChanged(g, r, e, gpu);
+         var p = pending ?? PendingOf(g, r, e);
+         return WarmChanged(g, r, e, gpu)
+             ?? (p.Unknown ? (p.Recorded + (p.Planned ?? 0) is > 0 and var u ? $"{u:N0} pipeline{(u == 1 ? "" : "s")} to compile again" : "compile again")
+@@ -2186,7 +2187,7 @@ public sealed partial class ScsKiller : IScsKiller
+     /// without the community or official recording in use (<see cref="CheckPlans"/>); or a recording waits for the plan to
+     /// tell its ray tracing (<see cref="RtPlanCheck"/>).</summary>
+     bool NeedsPlanCheck(Game g, GameRecord r, EngineInfo? e) =>
+-        r.WarmedAt != null && (!CurrentPlanner(r.PlanVersion, r.PlanRules, r.PlanReaderVersion, e) || r.PlanCommunity != CommunityObjects(g.Id)
++        e?.Family != Rage.Rage4Reader.Family && r.WarmedAt != null && (!CurrentPlanner(r.PlanVersion, r.PlanRules, r.PlanReaderVersion, e) || r.PlanCommunity != CommunityObjects(g.Id)
+             || r.PlanOfficial != OfficialInUse(g.Id)?.Object || OtherApi(r, e) || OtherEngine(r, e) || r.PlanFiltering != Filtering(g.Id, false, e)
+             || r.PlanRayTracing != RayTracing(r) && r.Plan?.Stats is { RtLibraries: > 0 } or { RtStateObjects: > 0 }) && WarmChanged(g, r, e) == null
+         || RtPlanCheck(r, e);
+@@ -6611,6 +6612,45 @@ public sealed partial class ScsKiller : IScsKiller
+         }
+         var engine = now!.Engine!;
+         var game = installed!;
++        if (engine.Family == Rage.Rage4Reader.Family)
++        {
++            Stage(QueueStage.Indexing);
++            await Gate(id, ct);
++            var gameExe = Path.GetFileName(game.ExePath);
++            await WhileGameRuns(gameExe, game.Name, ct);
++            await Gate(id, ct);
++            Stage(QueueStage.Warming);
++            var helper = Path.Combine(Store.DataDir, "tools", "GTAIV.exe");
++            var result = await Rage.Rage4Warm.Run(game, helper, Store.GameDir(id), Log, ct);
++            if (result.Failed != 0)
++            {
++                Stage(QueueStage.Failed, $"{result.Failed:N0} GTA IV shaders failed to warm");
++                return;
++            }
++            Log?.Report($"compile {game.Name}: done in {result.Seconds:0.00}s, {result.Done:N0} of {result.Total:N0} D3D9 shaders created through DXVK, 0 failed");
++            var rageRec = Store.LoadGame(id);
++            var rageGpu = Snapshot();
++            var readerVersion = _reader.ReaderVersion(engine);
++            var rules = RulesFile.Current.Hash(engine);
++            (rageRec.WarmedDriverId, rageRec.WarmedDriverVersion) = (rageGpu.Id, rageGpu.Gpu.DriverVersion);
++            (rageRec.WarmedAt, rageRec.LastWarmTime) = (DateTimeOffset.Now, TimeSpan.FromSeconds(result.Seconds));
++            (rageRec.LastWarmFailed, rageRec.LastWarmSkipped, rageRec.LastWarmCrashed, rageRec.LastWarmDriverSkipped, rageRec.LastWarmUnbuilt) = (0, 0, 0, 0, 0);
++            rageRec.WarmedExeName = gameExe;
++            (rageRec.WarmedGameVersion, rageRec.WarmedExeStamp, rageRec.WarmedIndexStamp) = (game.Version, ExeStamp(game), IndexStamp(game));
++            rageRec.WarmedIndexHash = ShaderIndex.EmptyContentHash;
++            rageRec.IndexContentHash = ShaderIndex.EmptyContentHash;
++            (rageRec.IndexGameVersion, rageRec.IndexExeStamp, rageRec.ShaderCount) = (game.Version, ExeStamp(game), result.Total);
++            (rageRec.PlanVersion, rageRec.WarmedPlanVersion) = (Planner.Version, Planner.Version);
++            (rageRec.PlanReaderVersion, rageRec.WarmedReaderVersion) = (readerVersion, readerVersion);
++            (rageRec.PlanRules, rageRec.WarmedPlanRules) = (rules, rules);
++            rageRec.PlanApi = ApiKey(engine.GraphicsApi);
++            rageRec.PlanEngine = EngineKey(engine);
++            rageRec.CompileFailedBuild = null;
++            Store.SaveGame(id, rageRec);
++            Refresh(game, ct);
++            Stage(QueueStage.Done);
++            return;
++        }
+         bool whenIdle;
+         lock (_lock) whenIdle = _whenIdle.Contains(id);
+         var rec = Store.LoadGame(id);
+diff --git a/src/SCSKiller.Core/Planning/Planner.cs b/src/SCSKiller.Core/Planning/Planner.cs
+index dcddddc..02bed50 100644
+--- a/src/SCSKiller.Core/Planning/Planner.cs
++++ b/src/SCSKiller.Core/Planning/Planner.cs
+@@ -1,7 +1,8 @@
+-´╗┐using System.IO.Compression;
++using System.IO.Compression;
+ using System.Numerics;
+ using System.Text.Json;
+ using SCSKiller.Core.Carved;
++using SCSKiller.Core.Rage;
+ using static SCSKiller.Core.Planning.PsoDb;
+ 
+ namespace SCSKiller.Core.Planning;
+@@ -100,6 +101,10 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
+     {
+         if (engine.Unsupported != null) return new(Readiness.Unsupported, engine.Unsupported);
+         if (engine.Encrypted) return new(Readiness.Unsupported, "encrypted game files");
++        if (engine.Family == Rage4Reader.Family)
++            return caps.Profile.StartsWith("nvidia", StringComparison.OrdinalIgnoreCase)
++                ? new(Readiness.Ready, "compiles GTA IV's D3D9 shaders through its DXVK Vulkan renderer")
++                : new(Readiness.Unsupported, "GTA IV D3D9/DXVK warming is currently supported on NVIDIA only");
+         // GraphicsApi: "D3D12[ (why)]", "D3D11[ (why)]", "VulkanÔÇª", or "D3D11 or D3D12" when the game offers both (UnrealRhi)
+         var api = engine.GraphicsApi;
+         var dx11 = api.StartsWith("D3D11") && D3D11Cache(caps);
+diff --git a/src/SCSKiller.Core/Rage/Rage4Reader.cs b/src/SCSKiller.Core/Rage/Rage4Reader.cs
+new file mode 100644
+index 0000000..785339f
+--- /dev/null
++++ b/src/SCSKiller.Core/Rage/Rage4Reader.cs
+@@ -0,0 +1,66 @@
++namespace SCSKiller.Core.Rage;
++
++/// <summary>GTA IV / RAGE 4 PC: loose RAGE FXC effects containing D3D9 SM3 bytecode. When FusionFix selects its
++/// Vulkan renderer, vulkan.dll is DXVK's 32-bit D3D9 implementation. The dedicated x86 warm backend replays these
++/// shaders through that exact DLL under the GTAIV.exe process name, filling NVIDIA's Vulkan shader cache.</summary>
++public sealed class Rage4Reader : IEngineReader
++{
++    public const string Family = "RAGE D3D9";
++    public const string Version = "GTA IV FXC";
++    public const string Api = "D3D9 (DXVK)";
++    public const string SteamId = "steam:12210";
++
++    static string ExeDir(Game game) => Path.GetDirectoryName(Path.GetFullPath(game.ExePath))!;
++
++    public EngineInfo? Detect(Game game)
++    {
++        if (!string.Equals(game.Id, SteamId, StringComparison.OrdinalIgnoreCase)) return null;
++        var dir = ExeDir(game);
++        var shaders = Path.Combine(dir, "common", "shaders");
++        if (!Directory.Exists(shaders) || !Directory.EnumerateFiles(shaders, "*.fxc", SearchOption.AllDirectories).Any())
++            return new(Family, Version, null, "D3D9", false, "GTA IV FXC shaders were not found");
++
++        var dxvk = Path.Combine(dir, "vulkan.dll");
++        var cfg = Path.Combine(dir, "d3d9.cfg");
++        var vulkan = File.Exists(dxvk) && File.Exists(cfg) && File.ReadLines(cfg).Any(l =>
++            l.Trim().Equals("API=1", StringComparison.OrdinalIgnoreCase));
++        return vulkan
++            ? new(Family, Version, null, Api, false, null, NoRtPipelines: true, NoRayTracing: true)
++            : new(Family, Version, null, "D3D9", false, "GTA IV support requires FusionFix with Graphics API set to Vulkan (DXVK)", NoRtPipelines: true, NoRayTracing: true);
++    }
++
++    public string DetectStamp(Game game, EngineInfo? engine)
++    {
++        try
++        {
++            var dir = ExeDir(game);
++            return string.Join("|", new[] { "vulkan.dll", "d3d9.cfg" }.Select(n => Path.Combine(dir, n)).Select(p =>
++                File.Exists(p) ? $"{p}:{new FileInfo(p).Length}:{File.GetLastWriteTimeUtc(p).Ticks}" : $"{p}:-"));
++        }
++        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return ""; }
++    }
++
++    public string IndexStamp(Game game)
++    {
++        try
++        {
++            var dir = ExeDir(game);
++            var files = Directory.EnumerateFiles(Path.Combine(dir, "common", "shaders"), "*.fxc", SearchOption.AllDirectories)
++                .Concat(Directory.Exists(Path.Combine(dir, "update", "common", "shaders"))
++                    ? Directory.EnumerateFiles(Path.Combine(dir, "update", "common", "shaders"), "*.fxc", SearchOption.AllDirectories)
++                    : []);
++            long bytes = 0, latest = 0; int count = 0;
++            foreach (var f in files) { var i = new FileInfo(f); count++; bytes += i.Length; latest = Math.Max(latest, i.LastWriteTimeUtc.Ticks); }
++            return $"{count}:{bytes}:{latest}";
++        }
++        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return ""; }
++    }
++
++    public int ReaderVersion(EngineInfo engine) => 1;
++
++    // The dedicated D3D9/DXVK backend consumes the FXC files directly, so the generic D3D11/12 planner never uses this index.
++    public ShaderIndex Index(Game game, EngineInfo engine, IProgress<string>? log, CancellationToken ct) =>
++        new(ShaderIndex.EmptyContentHash, ["D3D9_SM3_DXVK"], new Dictionary<string, ShaderInfo>(), []);
++
++    public void ReadShaders(Game game, EngineInfo engine, IReadOnlySet<string> sha1s, Action<string, byte[]> sink, CancellationToken ct) { }
++}
+diff --git a/src/SCSKiller.Core/Rage/Rage4Warm.cs b/src/SCSKiller.Core/Rage/Rage4Warm.cs
+new file mode 100644
+index 0000000..76bc14b
+--- /dev/null
++++ b/src/SCSKiller.Core/Rage/Rage4Warm.cs
+@@ -0,0 +1,59 @@
++using System.Diagnostics;
++using System.Text.RegularExpressions;
++
++namespace SCSKiller.Core.Rage;
++
++/// <summary>Launches the 32-bit GTA IV/DXVK warm helper under the game's executable name. The helper reads the loose
++/// RAGE FXC effects, feeds their D3D9 SM3 shaders to the game's own DXVK vulkan.dll, and exits without changing game files.</summary>
++public static partial class Rage4Warm
++{
++    public sealed record Result(int Done, int Total, int Failed, double Seconds);
++
++    [GeneratedRegex(@"done=(\d+) failed=(\d+) seconds=([0-9,.]+)", RegexOptions.CultureInvariant)]
++    private static partial Regex DoneLine();
++
++    public static async Task<Result> Run(Game game, string helper, string logDir, IProgress<string>? log, CancellationToken ct)
++    {
++        if (!File.Exists(helper)) throw new FileNotFoundException("GTA IV D3D9/DXVK warm helper is missing", helper);
++        var dir = Path.GetDirectoryName(Path.GetFullPath(game.ExePath))!;
++        if (!File.Exists(Path.Combine(dir, "vulkan.dll"))) throw new FileNotFoundException("GTA IV DXVK vulkan.dll is missing");
++
++        Directory.CreateDirectory(logDir);
++        var psi = new ProcessStartInfo(helper)
++        {
++            UseShellExecute = false,
++            RedirectStandardOutput = true,
++            RedirectStandardError = true,
++            CreateNoWindow = true,
++            WorkingDirectory = Path.GetDirectoryName(helper)!
++        };
++        psi.ArgumentList.Add(dir);
++        psi.Environment["DXVK_LOG_LEVEL"] = "warn";
++        psi.Environment["DXVK_LOG_PATH"] = logDir;
++
++        using var p = Process.Start(psi) ?? throw new InvalidOperationException("couldn't start the GTA IV warm helper");
++        var output = p.StandardOutput.ReadToEndAsync(ct);
++        var error = p.StandardError.ReadToEndAsync(ct);
++        try { await p.WaitForExitAsync(ct); }
++        catch (OperationCanceledException)
++        {
++            try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
++            throw;
++        }
++
++        var stdout = await output;
++        var stderr = await error;
++        foreach (var line in stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
++            if (line.StartsWith("fxc=") || line.StartsWith("dxvk=") || line.StartsWith("module=") || line.StartsWith("done=")) log?.Report($"{game.Name}: {line}");
++        if (!string.IsNullOrWhiteSpace(stderr))
++            foreach (var line in stderr.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Take(20)) log?.Report($"{game.Name}: {line}");
++
++        var m = DoneLine().Match(stdout);
++        if (p.ExitCode != 0 || !m.Success)
++            throw new InvalidOperationException($"GTA IV D3D9/DXVK warm failed (exit {p.ExitCode})" + (string.IsNullOrWhiteSpace(stderr) ? "" : $": {stderr.Trim()}"));
++        var done = int.Parse(m.Groups[1].Value);
++        var failed = int.Parse(m.Groups[2].Value);
++        var seconds = double.Parse(m.Groups[3].Value.Replace(',', '.'), System.Globalization.CultureInfo.InvariantCulture);
++        return new(done, done, failed, seconds);
++    }
++}
+diff --git a/tools/Gta4D3D9Warm/Gta4D3D9Warm.csproj b/tools/Gta4D3D9Warm/Gta4D3D9Warm.csproj
+new file mode 100644
+index 0000000..645f7a5
+--- /dev/null
++++ b/tools/Gta4D3D9Warm/Gta4D3D9Warm.csproj
+@@ -0,0 +1,12 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net9.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++    <AssemblyName>GTAIV</AssemblyName>
++  </PropertyGroup>
++  <ItemGroup>
++    <PackageReference Include="Vortice.Direct3D9" Version="3.8.3" />
++  </ItemGroup>
++</Project>
+diff --git a/tools/Gta4D3D9Warm/Program.cs b/tools/Gta4D3D9Warm/Program.cs
+new file mode 100644
+index 0000000..856ad49
+--- /dev/null
++++ b/tools/Gta4D3D9Warm/Program.cs
+@@ -0,0 +1,160 @@
++using System.Buffers.Binary;
++using System.Runtime.InteropServices;
++using System.Security.Cryptography;
++using Vortice.Direct3D9;
++using static Vortice.Direct3D9.D3D9;
++
++static class Native
++{
++    [DllImport("user32.dll")] public static extern IntPtr GetDesktopWindow();
++}
++
++sealed record ShaderBlob(bool Vertex, byte[] Data, string Source);
++
++static class RageFxc
++{
++    static byte U8(BinaryReader r) => r.ReadByte();
++    static ushort U16(BinaryReader r) => r.ReadUInt16();
++    static void SkipString(BinaryReader r) { var n = U8(r); r.BaseStream.Seek(n, SeekOrigin.Current); }
++
++    static byte[] ReadProgram(BinaryReader r)
++    {
++        var parameters = U8(r);
++        for (var i = 0; i < parameters; i++)
++        {
++            r.BaseStream.Seek(4, SeekOrigin.Current);
++            SkipString(r);
++        }
++        var size = U16(r);
++        _ = U16(r);
++        return r.ReadBytes(size);
++    }
++
++    public static IEnumerable<ShaderBlob> Read(string path)
++    {
++        using var s = File.OpenRead(path);
++        using var r = new BinaryReader(s);
++        if (r.ReadUInt32() != 0x61786772) yield break;
++
++        var vs = U8(r);
++        for (var i = 0; i < vs; i++)
++        {
++            var b = ReadProgram(r);
++            if (b.Length > 0) yield return new(true, b, path);
++        }
++
++        var ps = U8(r);
++        for (var i = 0; i < ps; i++)
++        {
++            var b = ReadProgram(r);
++            if (b.Length > 0) yield return new(false, b, path);
++        }
++    }
++}
++
++static class Program
++{
++    public static int Main(string[] args)
++    {
++        if (args.Length != 1 || !Directory.Exists(args[0]))
++        {
++            Console.Error.WriteLine("usage: GTAIV.exe <GTAIV folder>");
++            return 2;
++        }
++
++        var root = Path.GetFullPath(args[0]);
++        Console.WriteLine($"root={root}");
++        var unique = new Dictionary<string, ShaderBlob>(StringComparer.Ordinal);
++        var fxcCount = 0;
++        var bad = 0;
++        foreach (var f in Directory.EnumerateFiles(root, "*.fxc", SearchOption.AllDirectories))
++        {
++            fxcCount++;
++            try
++            {
++                foreach (var shader in RageFxc.Read(f))
++                {
++                    var h = Convert.ToHexStringLower(SHA1.HashData(shader.Data));
++                    unique.TryAdd(h, shader);
++                }
++            }
++            catch (Exception e)
++            {
++                bad++;
++                Console.Error.WriteLine($"fxc-error {f}: {e.Message}");
++            }
++        }
++
++        var vsCount = unique.Values.Count(x => x.Vertex);
++        var psCount = unique.Count - vsCount;
++        Console.WriteLine($"fxc={fxcCount} bad={bad} unique={unique.Count} vs={vsCount} ps={psCount}");
++
++        var invalid = unique.Values.Count(x => x.Data.Length < 4 || BinaryPrimitives.ReadUInt32LittleEndian(x.Data) != (x.Vertex ? 0xFFFE0300u : 0xFFFF0300u));
++        if (invalid != 0)
++        {
++            Console.Error.WriteLine($"invalid shader tokens={invalid}");
++            return 3;
++        }
++
++        var dxvk = Path.Combine(root, "vulkan.dll");
++        if (!File.Exists(dxvk))
++        {
++            Console.Error.WriteLine($"DXVK not found: {dxvk}");
++            return 5;
++        }
++        NativeLibrary.SetDllImportResolver(typeof(D3D9).Assembly, (library, assembly, searchPath) =>
++            string.Equals(library, "d3d9.dll", StringComparison.OrdinalIgnoreCase)
++                ? NativeLibrary.Load(dxvk)
++                : IntPtr.Zero);
++        Console.WriteLine($"dxvk={dxvk}");
++        using var d3d = Direct3DCreate9();
++        var hwnd = Native.GetDesktopWindow();
++        var pp = new PresentParameters
++        {
++            Windowed = true,
++            SwapEffect = SwapEffect.Discard,
++            DeviceWindowHandle = hwnd,
++            BackBufferWidth = 1,
++            BackBufferHeight = 1,
++            PresentationInterval = PresentInterval.Immediate
++        };
++
++        using var device = d3d.CreateDevice(0, DeviceType.Hardware, hwnd,
++            CreateFlags.HardwareVertexProcessing | CreateFlags.Multithreaded | CreateFlags.FpuPreserve,
++            pp);
++
++        Console.WriteLine("device=ok");
++        foreach (System.Diagnostics.ProcessModule m in System.Diagnostics.Process.GetCurrentProcess().Modules)
++            if (m.ModuleName.Contains("d3d9", StringComparison.OrdinalIgnoreCase) || m.ModuleName.Contains("vulkan", StringComparison.OrdinalIgnoreCase)) Console.WriteLine($"module={m.ModuleName} => {m.FileName}");
++        var done = 0;
++        var failed = 0;
++        var sw = System.Diagnostics.Stopwatch.StartNew();
++        foreach (var shader in unique.Values)
++        {
++            try
++            {
++                if (shader.Vertex)
++                {
++                    using var obj = device.CreateVertexShader<byte>(shader.Data);
++                }
++                else
++                {
++                    using var obj = device.CreatePixelShader<byte>(shader.Data);
++                }
++            }
++            catch (Exception e)
++            {
++                failed++;
++                if (failed <= 20) Console.Error.WriteLine($"create-error {(shader.Vertex ? "VS" : "PS")} {Path.GetFileName(shader.Source)}: {e.Message}");
++            }
++            done++;
++            if (done % 100 == 0 || done == unique.Count)
++                Console.WriteLine($"progress={done}/{unique.Count} failed={failed} rate={done / Math.Max(sw.Elapsed.TotalSeconds, 0.001):F0}/s");
++        }
++
++        Console.WriteLine($"done={done} failed={failed} seconds={sw.Elapsed.TotalSeconds:F2}");
++        return failed == 0 ? 0 : 4;
++    }
++}
++
++
