@@ -1,4 +1,4 @@
-﻿diff --git a/src/SCSKiller.Core/App/ScsKiller.cs b/src/SCSKiller.Core/App/ScsKiller.cs
+diff --git a/src/SCSKiller.Core/App/ScsKiller.cs b/src/SCSKiller.Core/App/ScsKiller.cs
 index f5c5bfe..d02c934 100644
 --- a/src/SCSKiller.Core/App/ScsKiller.cs
 +++ b/src/SCSKiller.Core/App/ScsKiller.cs
@@ -79,7 +79,7 @@ index dcddddc..02bed50 100644
 --- a/src/SCSKiller.Core/Planning/Planner.cs
 +++ b/src/SCSKiller.Core/Planning/Planner.cs
 @@ -1,7 +1,8 @@
--´╗┐using System.IO.Compression;
+-﻿using System.IO.Compression;
 +using System.IO.Compression;
  using System.Numerics;
  using System.Text.Json;
@@ -96,7 +96,7 @@ index dcddddc..02bed50 100644
 +            return caps.Profile.StartsWith("nvidia", StringComparison.OrdinalIgnoreCase)
 +                ? new(Readiness.Ready, "compiles GTA IV's D3D9 shaders through its DXVK Vulkan renderer")
 +                : new(Readiness.Unsupported, "GTA IV D3D9/DXVK warming is currently supported on NVIDIA only");
-         // GraphicsApi: "D3D12[ (why)]", "D3D11[ (why)]", "VulkanÔÇª", or "D3D11 or D3D12" when the game offers both (UnrealRhi)
+         // GraphicsApi: "D3D12[ (why)]", "D3D11[ (why)]", "Vulkan…", or "D3D11 or D3D12" when the game offers both (UnrealRhi)
          var api = engine.GraphicsApi;
          var dx11 = api.StartsWith("D3D11") && D3D11Cache(caps);
 diff --git a/src/SCSKiller.Core/Rage/Rage4Reader.cs b/src/SCSKiller.Core/Rage/Rage4Reader.cs
